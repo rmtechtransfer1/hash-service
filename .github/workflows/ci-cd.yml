@@ -1,0 +1,163 @@
+# .github/workflows/ci-cd.yml
+
+# It USES the actions from the rmtechtransfer1/github-actions-security repository
+# https://github.com/rmtechtransfer1/github-actions-security
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main", "develop" ]
+  pull_request:
+    branches: [ "main" ]
+  release:
+    types: [ published ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+permissions:
+  contents: read
+  packages: write
+  security-events: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    # Using action from github-actions-security repo
+    - name: Set up build dependencies
+      uses: rmtechtransfer1/github-actions-security/build-stage/setup-dependencies@v1.2.0
+      with:
+        python-version: '3.11'
+        cache-key-suffix: ${{ hashFiles('**/requirements*.txt') }}
+
+    # Using action from github-actions-security repo  
+    - name: Build and test C++ components
+      uses: rmtechtransfer1/github-actions-security/build-stage/cpp-build-test@v1.2.0
+      with:
+        build-type: Release
+        enable-testing: true
+
+    # Using action from github-actions-security repo
+    - name: Test Python service
+      uses: rmtechtransfer1/github-actions-security/build-stage/python-test@v1.2.0
+      with:
+        requirements-file: requirements.txt
+        test-path: tests/
+
+    # Using action from github-actions-security repo
+    - name: Build container image
+      id: build
+      uses: rmtechtransfer1/github-actions-security/security/container-build@v1.2.0
+      with:
+        image-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        dockerfile: Dockerfile
+        context: .
+        registry-username: ${{ github.actor }}
+        registry-password: ${{ secrets.GITHUB_TOKEN }}
+        platforms: linux/amd64,linux/arm64
+
+    - name: Generate image identifier
+      id: image
+      run: echo "image=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}" >> $GITHUB_OUTPUT
+
+  security-scan:
+    runs-on: ubuntu-latest
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        scan-type: [sbom, vulnerabilities, static-analysis]
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    # Using action from github-actions-security repo
+    - name: Generate SBOM
+      if: matrix.scan-type == 'sbom'
+      uses: rmtechtransfer1/github-actions-security/security/sbom-generation@v1.2.0
+      with:
+        cpp-project: true
+        python-project: true
+
+    # Using action from github-actions-security repo
+    - name: Vulnerability scan
+      if: matrix.scan-type == 'vulnerabilities'
+      uses: rmtechtransfer1/github-actions-security/security/vuln-misconfig-scans@v1.2.0
+      with:
+        image-tag: ${{ needs.build.outputs.image }}
+        severity: "CRITICAL,HIGH"
+        fail-on-issues: true
+
+    # Using action from github-actions-security repo
+    - name: Static analysis
+      if: matrix.scan-type == 'static-analysis'
+      uses: rmtechtransfer1/github-actions-security/security/static-analysis/bandit@v1.2.0
+      with:
+        source-path: src/
+        exclude-paths: tests/,docs/
+
+  attestation:
+    runs-on: ubuntu-latest
+    needs: [build, security-scan]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    if: github.event_name != 'pull_request'
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    # Using action from github-actions-security repo
+    - name: Sign and attest container
+      uses: rmtechtransfer1/github-actions-security/security/container-attestation@v1.2.0
+      with:
+        image-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        image-digest: ${{ needs.build.outputs.digest }}
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [build, security-scan, attestation]
+    environment: production
+    if: github.ref == 'refs/heads/main'
+    steps:
+    - name: Deploy to production
+      run: |
+        echo "Deploying ${{ needs.build.outputs.image }} to production"
+        # Your application-specific deployment logic here
+        kubectl set image deployment/my-app container=${{ needs.build.outputs.image }}
+
+  compliance:
+    runs-on: ubuntu-latest
+    needs: [attestation]
+    if: github.event_name == 'release'
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    # Using action from github-actions-security repo
+    - name: Generate compliance evidence
+      uses: rmtechtransfer1/github-actions-security/compliance/oscal-generation@v1.2.0
+      with:
+        include-sboms: true
+        include-scan-results: true
+        include-attestations: true
+
+    # Using action from github-actions-security repo  
+    - name: Create release package
+      uses: rmtechtransfer1/github-actions-security/compliance/release-automation@v1.2.0
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        image-digest: ${{ needs.build.outputs.digest }}
+        image-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
