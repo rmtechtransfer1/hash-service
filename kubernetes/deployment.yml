@@ -1,0 +1,113 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hash-service
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hash-service
+  namespace: hash-service
+  labels:
+    app: hash-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hash-service
+  template:
+    metadata:
+      labels:
+        app: hash-service
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      containers:
+      - name: hash-service
+        image: hash-service:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          protocol: TCP
+          name: http
+        env:
+        - name: CLI_APP_PATH
+          value: "/app/build/bin/cli_app"
+        - name: PYTHONPATH
+          value: "/app/site-packages:/app"
+        # Security Context for container
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65532
+          runAsGroup: 65532
+          capabilities:
+            drop:
+            - ALL
+        # Resource limits and requests
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        # Volume mounts for writable directories
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: cache
+          mountPath: /app/.cache
+        # Health checks
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 15
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 0
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 30
+      # Volumes for writable directories
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: cache
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hash-service
+  namespace: hash-service
+  labels:
+    app: hash-service
+spec:
+  type: ClusterIP
+  selector:
+    app: hash-service
+  ports:
+  - port: 8080
+    targetPort: http
+    protocol: TCP
+    name: http

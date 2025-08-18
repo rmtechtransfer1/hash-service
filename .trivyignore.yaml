@@ -1,0 +1,24 @@
+# Trivy ignore configuration in YAML format
+# security_compliance/trivy/.trivyignore.yaml
+# Tracking trivyignore issues: https://github.com/aquasecurity/trivy-action/issues/436
+
+vulnerabilities:
+  # Python setuptools vulnerabilities in base Python image
+  - id: CVE-2024-6345
+    reason: "False Positive - setuptools already patched in base Python image"
+  - id: CVE-2025-47273
+    reason: "False Positive - setuptools already patched in base Python image"
+
+misconfigurations:
+  # Docker misconfigurations
+  - id: DS026
+    reason: "HEALTHCHECK not possible in distroless images"
+  - id: KSV013
+    reason: "Latest tag acceptable for local Kind deployments"
+ 
+  # Kubernetes misconfiguration 
+  - id: KSV104
+    reason: "readOnlyRootFilesystem - False positive for this application"
+    
+  - id: KSV030
+    reason: "Seccomp profile - RuntimeDefault not required for development environment"

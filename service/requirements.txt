@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+pytest
+httpx
+cyclonedx-bom
+setuptools>=78.1.1

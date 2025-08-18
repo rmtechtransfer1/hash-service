@@ -1,0 +1,5 @@
+# .clang-tidy
+Checks: '-*,bugprone-*,cert-*,clang-analyzer-*,performance-*'
+WarningsAsErrors: 'bugprone-*,clang-analyzer-*'
+HeaderFilterRegex: 'cpp/.*'
+FormatStyle: file
