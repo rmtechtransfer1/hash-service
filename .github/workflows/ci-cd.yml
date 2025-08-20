@@ -1,163 +1,224 @@
-# .github/workflows/ci-cd.yml
-
-# It USES the actions from the rmtechtransfer1/github-actions-security repository
-# https://github.com/rmtechtransfer1/github-actions-security
-
-name: CI/CD Pipeline
+name: CI with rmtechtransfer1 Security Workflows
 
 on:
   push:
-    branches: [ "main", "develop" ]
+    branches: [ main, develop ]
+    paths-ignore:
+      - 'Kubernetes/**'
+      - 'Docker/**'
+      - 'security_compliance/policy/**'
+      - '.github/workflows/policy-check.yml'
   pull_request:
-    branches: [ "main" ]
-  release:
-    types: [ published ]
-
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+    branches: [ main ]
+    paths-ignore:
+      - 'Kubernetes/**'
+      - 'Docker/**'
+      - 'security_compliance/policy/**'
+      - '.github/workflows/policy-check.yml'
 
 permissions:
   contents: read
   packages: write
-  security-events: write
   id-token: write
+  actions: read
+  security-events: write
+
+env:
+  BUILD_TYPE: Release
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build:
+  # Step 1: Setup dependencies using your local action
+  setup-dependencies:
     runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Setup dependencies and cache
+      uses: ./.github/actions/build-stage/setup-dependencies
+
+    # Cache the setup for other jobs
+    - name: Cache setup
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/pip
+          build
+        key: ${{ runner.os }}-setup-${{ github.sha }}
+
+  # Step 2: C++ Security using rmtechtransfer1 reusable workflow
+  cpp-security:
+    needs: setup-dependencies
+    uses: rmtechtransfer1/github-actions-security/.github/workflows/cmake-security.yml@main
+    with:
+      build-type: Release
+      source-dir: '.'
+      build-dir: 'build'
+      cmake-args: '-G Ninja'
+      upload-artifacts: true
+    permissions:
+      contents: read
+      security-events: write
+
+  # Step 3: Python Security using rmtechtransfer1 reusable workflow
+  python-security:
+    needs: setup-dependencies
+    uses: rmtechtransfer1/github-actions-security/.github/workflows/python-security.yml@main
+    with:
+      python-version: '3.11'
+      source-dir: 'service'
+      requirements-file: 'service/requirements.txt'
+      test-dir: 'service/tests'
+      bandit-severity: 'll'
+      fail-on-security-issues: true
+    permissions:
+      contents: read
+      security-events: write
+
+  # Step 4: Bandit Code Scanning using rmtechtransfer1 reusable workflow
+  bandit-code-scanning:
+    needs: setup-dependencies
+    uses: rmtechtransfer1/github-actions-security/.github/workflows/bandit-code-scanning.yml@main
+    with:
+      scan-path: 'service/'
+      confidence-level: 'high'
+      severity-level: 'high'
+      exclude-paths: 'service/tests,service/.venv'
+      upload-sarif: true
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+
+  # Step 5: Your existing SBOM generation (now depends on security scans)
+  sbom-generation:
+    needs: [cpp-security, python-security]
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Restore setup cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/pip
+          build
+        key: ${{ runner.os }}-setup-${{ github.sha }}
+
+    - name: Setup dependencies and cache
+      uses: ./.github/actions/build-stage/setup-dependencies
+
+    - name: Download C++ build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ needs.cpp-security.outputs.artifact-name }}
+        path: build/
+
+    - name: Generate source SBOMs
+      run: |
+        # Your existing SBOM generation logic
+        curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sudo sh -s -- -b /usr/local/bin
+        pip install cyclonedx-bom sbomconvert
+        
+        # Generate SBOMs
+        syft . -o cyclonedx-json=cpp-source-sbom.cyclonedx.json
+        cyclonedx-py environment --spec-version 1.6 --output-format JSON --output-file python-source-sbom.cyclonedx.json
+
+    - name: Upload source SBOMs
+      uses: actions/upload-artifact@v4
+      with:
+        name: source-sboms
+        path: "*-source-sbom.*.json"
+        retention-days: 30
+
+  # Step 6: Your existing container build (now depends on all security scans)
+  container-build:
+    needs: [cpp-security, python-security, bandit-code-scanning, sbom-generation]
+    runs-on: ubuntu-22.04
     outputs:
-      image: ${{ steps.image.outputs.image }}
       digest: ${{ steps.build.outputs.digest }}
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-
-    # Using action from github-actions-security repo
-    - name: Set up build dependencies
-      uses: rmtechtransfer1/github-actions-security/build-stage/setup-dependencies@v1.2.0
-      with:
-        python-version: '3.11'
-        cache-key-suffix: ${{ hashFiles('**/requirements*.txt') }}
-
-    # Using action from github-actions-security repo  
-    - name: Build and test C++ components
-      uses: rmtechtransfer1/github-actions-security/build-stage/cpp-build-test@v1.2.0
-      with:
-        build-type: Release
-        enable-testing: true
-
-    # Using action from github-actions-security repo
-    - name: Test Python service
-      uses: rmtechtransfer1/github-actions-security/build-stage/python-test@v1.2.0
-      with:
-        requirements-file: requirements.txt
-        test-path: tests/
-
-    # Using action from github-actions-security repo
-    - name: Build container image
-      id: build
-      uses: rmtechtransfer1/github-actions-security/security/container-build@v1.2.0
-      with:
-        image-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-        dockerfile: Dockerfile
-        context: .
-        registry-username: ${{ github.actor }}
-        registry-password: ${{ secrets.GITHUB_TOKEN }}
-        platforms: linux/amd64,linux/arm64
-
-    - name: Generate image identifier
-      id: image
-      run: echo "image=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}" >> $GITHUB_OUTPUT
-
-  security-scan:
-    runs-on: ubuntu-latest
-    needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        scan-type: [sbom, vulnerabilities, static-analysis]
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-
-    # Using action from github-actions-security repo
-    - name: Generate SBOM
-      if: matrix.scan-type == 'sbom'
-      uses: rmtechtransfer1/github-actions-security/security/sbom-generation@v1.2.0
-      with:
-        cpp-project: true
-        python-project: true
-
-    # Using action from github-actions-security repo
-    - name: Vulnerability scan
-      if: matrix.scan-type == 'vulnerabilities'
-      uses: rmtechtransfer1/github-actions-security/security/vuln-misconfig-scans@v1.2.0
-      with:
-        image-tag: ${{ needs.build.outputs.image }}
-        severity: "CRITICAL,HIGH"
-        fail-on-issues: true
-
-    # Using action from github-actions-security repo
-    - name: Static analysis
-      if: matrix.scan-type == 'static-analysis'
-      uses: rmtechtransfer1/github-actions-security/security/static-analysis/bandit@v1.2.0
-      with:
-        source-path: src/
-        exclude-paths: tests/,docs/
-
-  attestation:
-    runs-on: ubuntu-latest
-    needs: [build, security-scan]
+      tags: ${{ steps.meta.outputs.tags }}
     permissions:
       contents: read
       packages: write
-      id-token: write
-      attestations: write
-    if: github.event_name != 'pull_request'
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    # Using action from github-actions-security repo
-    - name: Sign and attest container
-      uses: rmtechtransfer1/github-actions-security/security/container-attestation@v1.2.0
-      with:
-        image-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-        image-digest: ${{ needs.build.outputs.digest }}
+      - name: Restore setup cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            build
+          key: ${{ runner.os }}-setup-${{ github.sha }}
 
-  deploy:
+      - name: Download C++ build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.cpp-security.outputs.artifact-name }}
+          path: build/
+
+      # Your existing container build steps...
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log into registry ${{ env.REGISTRY }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Docker/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Step 7: Security summary and status report
+  security-summary:
+    if: always()
+    needs: [cpp-security, python-security, bandit-code-scanning]
     runs-on: ubuntu-latest
-    needs: [build, security-scan, attestation]
-    environment: production
-    if: github.ref == 'refs/heads/main'
     steps:
-    - name: Deploy to production
+    - name: Security Summary Report
       run: |
-        echo "Deploying ${{ needs.build.outputs.image }} to production"
-        # Your application-specific deployment logic here
-        kubectl set image deployment/my-app container=${{ needs.build.outputs.image }}
-
-  compliance:
-    runs-on: ubuntu-latest
-    needs: [attestation]
-    if: github.event_name == 'release'
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-
-    # Using action from github-actions-security repo
-    - name: Generate compliance evidence
-      uses: rmtechtransfer1/github-actions-security/compliance/oscal-generation@v1.2.0
-      with:
-        include-sboms: true
-        include-scan-results: true
-        include-attestations: true
-
-    # Using action from github-actions-security repo  
-    - name: Create release package
-      uses: rmtechtransfer1/github-actions-security/compliance/release-automation@v1.2.0
-      with:
-        github-token: ${{ secrets.GITHUB_TOKEN }}
-        image-digest: ${{ needs.build.outputs.digest }}
-        image-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        echo "## Security Scan Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Scan Results:" >> $GITHUB_STEP_SUMMARY
+        echo "- **C++ Security (Clang-tidy)**: ${{ needs.cpp-security.result }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Python Security (Bandit)**: ${{ needs.python-security.result }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Code Scanning (SARIF)**: ${{ needs.bandit-code-scanning.result }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [[ "${{ needs.cpp-security.result }}" == "failure" || "${{ needs.python-security.result }}" == "failure" ]]; then
+          echo " **Security scan failures detected!**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Please review the security scan results and fix any issues before proceeding." >> $GITHUB_STEP_SUMMARY
+          exit 1
+        else
+          echo " **All security scans passed successfully**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Outputs Available:" >> $GITHUB_STEP_SUMMARY
+          echo "- Build artifacts: \`${{ needs.cpp-security.outputs.artifact-name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Build directory: \`${{ needs.cpp-security.outputs.build-output-dir }}\`" >> $GITHUB_STEP_SUMMARY
+        fi
