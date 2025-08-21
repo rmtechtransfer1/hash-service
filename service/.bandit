@@ -1,0 +1,4 @@
+# service/.bandit
+[bandit]
+exclude_dirs = /tests,/.venv
+skips = B104  # Skip hardcoded_bind_all_interfaces check
