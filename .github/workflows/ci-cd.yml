@@ -1,6 +1,7 @@
 name: CI with Centralized Security Setup
 
 on:
+  workflow_dispatch:
   push:
     branches: [ main, develop ]
     tags:
