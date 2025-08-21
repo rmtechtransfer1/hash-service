@@ -1,4 +1,4 @@
-name: CI with Centralized Security Setup-
+name: CI with Centralized Security Setup
 
 on:
   workflow_dispatch:
@@ -32,7 +32,7 @@ env:
 
 jobs:
   # Step 1: C++ Security with centralized setup
-  call-workflow-passing-data:    
+  cpp-security:
     uses: rmtechtransfer1/github-actions-security/.github/workflows/cmake-security.yml@main
     with:
       build-type: Release
@@ -40,9 +40,59 @@ jobs:
       build-dir: 'build'
       cmake-args: '-G Ninja'
       upload-artifacts: true
+    secrets:
+      token: ${{ secrets.GITHUB_TOKEN }} 
+    permissions:
+      contents: read
+      security-events: write
+
+  # Step 2: Python Security with centralized setup
+  python-security:
+    uses: rmtechtransfer1/github-actions-security/.github/workflows/python-security.yml@main
+    with:
+      python-version: '3.11'
+      source-dir: 'service'
+      requirements-file: 'service/requirements.txt'
+      test-dir: 'service/tests'
+      bandit-severity: 'll'
+      fail-on-security-issues: true
     secrets: inherit  
     permissions:
       contents: read
       security-events: write
 
- 
+  # Step 3: Bandit Code Scanning
+  bandit-code-scanning:
+    uses: rmtechtransfer1/github-actions-security/.github/workflows/bandit-code-scanning.yml@main
+    with:
+      scan-path: 'service/'
+      confidence-level: 'high'
+      severity-level: 'high'
+      exclude-paths: 'service/tests,service/.venv'
+      upload-sarif: true
+    secrets: inherit 
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+
+  # Step 4: Prepare and validate outputs
+  prepare-artifacts:
+    needs: [cpp-security, python-security, bandit-code-scanning]
+    runs-on: ubuntu-latest
+    outputs:
+      cpp-artifact-name: ${{ steps.validate.outputs.cpp-artifact-name }}
+      cpp-build-dir: ${{ steps.validate.outputs.cpp-build-dir }}
+      all-scans-passed: ${{ steps.validate.outputs.all-scans-passed }}
+
+    steps:
+    - name: Validate outputs
+      id: validate
+      run: |
+        CPP_ARTIFACT="${{ needs.cpp-security.outputs.artifact-name }}"
+        if [ -z "$CPP_ARTIFACT" ] || [ "$CPP_ARTIFACT" = "null" ]; then
+          CPP_ARTIFACT="cmake-build-${{ github.run_number }}"
+        fi
+        echo "cpp-artifact-name=$CPP_ARTIFACT" >> "$GITHUB_OUTPUT"
+        echo "cpp-build-dir=build" >> "$GITHUB_OUTPUT"
+        echo "all-scans-passed=true" >> "$GITHUB_OUTPUT"
