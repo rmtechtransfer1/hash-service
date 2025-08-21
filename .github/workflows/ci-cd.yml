@@ -1,4 +1,4 @@
-name: CI with Centralized Security Setup
+name: CI with Centralized Security Setup-
 
 on:
   workflow_dispatch:
