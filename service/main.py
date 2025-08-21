@@ -74,6 +74,5 @@ def hash_message(msg: Annotated[str | None, Query(min_length=1)]):
 # Runs FASTAPI app with Uvicorn server
 if __name__ == "__main__":
     import uvicorn
-
-    uvicorn.run(app, host="0.0.0.0", port=8080
-    )
+    # nosec B104 - Binding to all interfaces is required for Docker container
+    uvicorn.run(app, host="0.0.0.0", port=8080)  # nosec
